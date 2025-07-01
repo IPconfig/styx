@@ -27,6 +27,7 @@ from styx.common.util.aio_task_scheduler import AIOTaskScheduler
 from worker.operator_state.aria.in_memory_state import InMemoryOperatorState
 from worker.operator_state.stateless import Stateless
 from worker.fault_tolerance.async_snapshots import AsyncSnapshotsMinio
+from worker.fault_tolerance.uncoordinated_snapshots import UncoordinatedSnapshotsMinio
 from worker.transactional_protocols.aria import AriaProtocol
 from worker.util.container_monitor import ContainerMonitor
 
@@ -34,7 +35,7 @@ SERVER_PORT: int = 5000
 PROTOCOL_PORT: int = 6000
 DISCOVERY_HOST: str = os.environ['DISCOVERY_HOST']
 DISCOVERY_PORT: int = int(os.environ['DISCOVERY_PORT'])
-INGRESS_TYPE = os.getenv('INGRESS_TYPE', None)
+INGRESS_TYPE: str = os.getenv('INGRESS_TYPE', 'KAFKA')
 
 MINIO_URL: str = f"{os.environ['MINIO_HOST']}:{os.environ['MINIO_PORT']}"
 MINIO_ACCESS_KEY: str = os.environ['MINIO_ROOT_USER']
@@ -42,7 +43,10 @@ MINIO_SECRET_KEY: str = os.environ['MINIO_ROOT_PASSWORD']
 KAFKA_URL: str = os.environ['KAFKA_URL']
 HEARTBEAT_INTERVAL: int = int(os.getenv('HEARTBEAT_INTERVAL', 500))  # 500ms
 
-PROTOCOL = Protocols.Aria
+PROTOCOL: Protocols = Protocols(os.getenv('PROTOCOL', 0))
+
+# Checkpointing strategy configuration
+CHECKPOINTING_STRATEGY: str = os.getenv('CHECKPOINTING_STRATEGY', 'COORDINATED')
 
 # TODO Check dynamic r/w sets
 # TODO networking can take a lot of optimization (i.e., batching, backpreasure e.t.c.)
@@ -226,7 +230,18 @@ class Worker(object):
     def attach_state_to_operators(self):
         operator_partitions: set[OperatorPartition] = set(self.registered_operators.keys())
         if self.operator_state_backend is LocalStateBackend.DICT:
-            self.async_snapshots = AsyncSnapshotsMinio(self.id, n_assigned_partitions=len(operator_partitions))
+            # Initialize appropriate snapshotter based on checkpointing strategy
+            if CHECKPOINTING_STRATEGY == 'UNCOORDINATED':
+                self.async_snapshots = UncoordinatedSnapshotsMinio(
+                    self.id, n_assigned_partitions=len(operator_partitions)
+                )
+                logging.info(f"Worker {self.id} initialized with UNCOORDINATED checkpointing")
+            else:
+                self.async_snapshots = AsyncSnapshotsMinio(
+                    self.id, n_assigned_partitions=len(operator_partitions)
+                )
+                logging.info(f"Worker {self.id} initialized with COORDINATED checkpointing")
+                
             if PROTOCOL == Protocols.Aria:
                 self.local_state = InMemoryOperatorState(operator_partitions)
             else:

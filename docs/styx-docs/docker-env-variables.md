@@ -83,7 +83,8 @@ These environment variables configure the **Styx Worker**, including discovery, 
 | Variable              | Default Value     | Description                                 |
 |------------------------|--------------------|---------------------------------------------|
 | `SNAPSHOT_BUCKET_NAME` | `styx-snapshots`  | Bucket where snapshots are stored           |
-| `SNAPSHOT_FREQUENCY`  | `10` (seconds)     | Snapshot frequency in epochs                |
+| `SNAPSHOT_FREQUENCY_SEC` | `10` (seconds) | Snapshot frequency for both coordinated and uncoordinated strategies |
+| `CHECKPOINTING_STRATEGY` | `COORDINATED`   | Checkpointing strategy: `COORDINATED` or `UNCOORDINATED` |
 
 ---
 

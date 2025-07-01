@@ -30,7 +30,7 @@ sleep 5
 # Tried to suppress with -p or top-level name but it was not respected.
 # docker inspect <container name> | grep -i project
 # should show that all containers share the same project and context
-docker-compose -f docker-compose-minio-dev.yml up -d
+docker compose -f docker-compose-minio-dev.yml up -d
 sleep 10
 
 # Step: 3

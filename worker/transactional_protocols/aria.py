@@ -19,6 +19,7 @@ from styx.common.util.aio_task_scheduler import AIOTaskScheduler
 
 from worker.egress.styx_kafka_batch_egress import StyxKafkaBatchEgress
 from worker.fault_tolerance.async_snapshots import AsyncSnapshotsMinio
+from worker.fault_tolerance.uncoordinated_snapshots import UncoordinatedSnapshotsMinio
 from worker.ingress.styx_kafka_ingress import StyxKafkaIngress
 from worker.operator_state.aria.conflict_detection_types import AriaConflictDetectionType
 from worker.operator_state.aria.in_memory_state import InMemoryOperatorState
@@ -39,6 +40,9 @@ SNAPSHOTTING_THREADS: int = int(os.getenv('SNAPSHOTTING_THREADS', 4))
 SEQUENCE_MAX_SIZE: int = int(os.getenv('SEQUENCE_MAX_SIZE', 1_000))
 USE_FALLBACK_CACHE: bool = bool(os.getenv('USE_FALLBACK_CACHE', True))
 KAFKA_URL: str = os.environ['KAFKA_URL']
+
+# Checkpointing strategy configuration
+CHECKPOINTING_STRATEGY: str = os.getenv('CHECKPOINTING_STRATEGY', 'COORDINATED')  # 'COORDINATED' or 'UNCOORDINATED'
 
 
 class AriaProtocol(BaseTransactionalProtocol):
@@ -71,7 +75,19 @@ class AriaProtocol(BaseTransactionalProtocol):
         self.local_state: InMemoryOperatorState | Stateless = state
         self.aio_task_scheduler: AIOTaskScheduler = AIOTaskScheduler()
         self.background_functions: AIOTaskScheduler = AIOTaskScheduler()
-        self.async_snapshots: AsyncSnapshotsMinio = async_snapshots
+        
+        # Checkpointing strategy configuration
+        self.checkpointing_strategy = CHECKPOINTING_STRATEGY
+        
+        # Initialize appropriate snapshotter based on strategy
+        if self.checkpointing_strategy == 'UNCOORDINATED':
+            self.async_snapshots: UncoordinatedSnapshotsMinio = UncoordinatedSnapshotsMinio(
+                worker_id, len(registered_operators)
+            )
+            logging.info(f"Worker {worker_id} using UNCOORDINATED checkpointing strategy")
+        else:
+            self.async_snapshots: AsyncSnapshotsMinio = async_snapshots
+            logging.info(f"Worker {worker_id} using COORDINATED checkpointing strategy")
 
         # worker_id: (host, port)
         self.peers: dict[int, tuple[str, int, int]] = peers
@@ -195,27 +211,56 @@ class AriaProtocol(BaseTransactionalProtocol):
         return success
 
     def take_snapshot(self, pool: concurrent.futures.ProcessPoolExecutor):
-        is_snapshot_time: bool = timer() > self.snapshot_timer + SNAPSHOT_FREQUENCY
-        if is_snapshot_time and not self.async_snapshots.snapshot_in_progress:
-            logging.warning(f"Taking snapshot at epoch: {self.sequencer.epoch_counter}")
+        # Check if we should take a snapshot based on the strategy
+        if self.checkpointing_strategy == 'UNCOORDINATED':
+            # Uncoordinated checkpointing - check local timing
+            if not self.async_snapshots.should_take_snapshot():
+                return
+        else:
+            # Coordinated checkpointing - check global timing
+            is_snapshot_time: bool = timer() > self.snapshot_timer + SNAPSHOT_FREQUENCY
+            if not is_snapshot_time or self.async_snapshots.snapshot_in_progress:
+                return
             self.snapshot_timer = timer()
-            if InMemoryOperatorState.__name__ == self.local_state.__class__.__name__:
-                loop = asyncio.get_running_loop()
-                self.async_snapshots.start_snapshotting(msgpack.decode(msgpack.encode(self.topic_partition_offsets)),
-                                                        msgpack.decode(msgpack.encode(self.egress.topic_partition_output_offsets)),
-                                                        self.sequencer.epoch_counter, self.sequencer.t_counter)
-                data = self.local_state.get_data_for_snapshot()
-                for operator_partition in self.registered_operators.keys():
-                    operator_name, partition = operator_partition
-                    loop.run_in_executor(pool,
-                                         self.async_snapshots.store_snapshot,
-                                         self.async_snapshots.snapshot_id,
-                                         f"data/{operator_name}/{partition}/{self.async_snapshots.snapshot_id}.bin",
-                                         msgpack.decode(msgpack.encode(data[operator_partition]))
-                                         ).add_done_callback(self.async_snapshots.snapshot_completed_callback)
-                self.local_state.clear_delta_map()
-            else:
-                logging.warning("Snapshot currently supported only for in-memory and incremental operator state")
+        
+        if self.async_snapshots.snapshot_in_progress:
+            return
+            
+        logging.warning(f"Taking {self.checkpointing_strategy} snapshot at epoch: {self.sequencer.epoch_counter}")
+        
+        if InMemoryOperatorState.__name__ == self.local_state.__class__.__name__:
+            loop = asyncio.get_running_loop()
+            self.async_snapshots.start_snapshotting(
+                msgpack.decode(msgpack.encode(self.topic_partition_offsets)),
+                msgpack.decode(msgpack.encode(self.egress.topic_partition_output_offsets)),
+                self.sequencer.epoch_counter, 
+                self.sequencer.t_counter
+            )
+            
+            data = self.local_state.get_data_for_snapshot()
+            
+            for operator_partition in self.registered_operators.keys():
+                operator_name, partition = operator_partition
+                
+                # Choose snapshot path based on strategy
+                if self.checkpointing_strategy == 'UNCOORDINATED':
+                    snapshot_path = self.async_snapshots.get_snapshot_path(
+                        operator_name, partition, self.async_snapshots.snapshot_id
+                    )
+                else:
+                    snapshot_path = f"data/{operator_name}/{partition}/{self.async_snapshots.snapshot_id}.bin"
+                
+                loop.run_in_executor(
+                    pool,
+                    self.async_snapshots.store_snapshot,
+                    self.async_snapshots.snapshot_id,
+                    snapshot_path,
+                    msgpack.decode(msgpack.encode(data[operator_partition]))
+                ).add_done_callback(self.async_snapshots.snapshot_completed_callback)
+            
+            self.local_state.clear_delta_map()
+        else:
+            logging.warning("Snapshot currently supported only for in-memory and incremental operator state")
 
     async def communication_protocol(self):
         await self.ingress.start(self.topic_partitions, self.topic_partition_offsets)

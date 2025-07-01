@@ -32,6 +32,8 @@ services:
       - KAFKA_URL=kafka1:19092
       - DISCOVERY_HOST=coordinator
       - DISCOVERY_PORT=8888
+      - CHECKPOINTING_STRATEGY=COORDINATED
+      - SNAPSHOT_FREQUENCY_SEC=10
     env_file:
     # Relative path of env file two levels up
       - ../../env/minio.env

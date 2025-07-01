@@ -1,0 +1,97 @@
+version: "3.8"
+
+services:
+  # Infrastructure services
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    ports:
+      - "9092:9092"
+      - "19092:19092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://0.0.0.0:9092,CONTROLLER://kafka:29093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAME: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_DELETE_TOPIC_ENABLE: "true"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+
+  # Styx services
+  coordinator:
+    build:
+      context: .
+      dockerfile: coordinator/coordinator.dockerfile
+    image: test/styx-coordinator:latest
+    ports:
+      - "8886:8888"
+      - "8000:8000"
+    environment:
+      - KAFKA_URL=kafka:29092
+      - HEARTBEAT_LIMIT=5000
+      - HEARTBEAT_CHECK_INTERVAL=500
+      - SNAPSHOT_BUCKET_NAME=styx-snapshots
+      - SNAPSHOT_FREQUENCY_SEC=10
+      - SNAPSHOT_COMPACTION_INTERVAL_SEC=10
+      - MINIO_HOST=minio
+      - MINIO_PORT=9000
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    depends_on:
+      - kafka
+      - minio
+
+  # Test runner service
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    image: test/styx-test-runner:latest
+    environment:
+      - CHECKPOINTING_STRATEGY=${CHECKPOINTING_STRATEGY:-COORDINATED}
+      - SNAPSHOT_FREQUENCY_SEC=${SNAPSHOT_FREQUENCY_SEC:-10}
+      - KAFKA_URL=kafka:29092
+      - DISCOVERY_HOST=coordinator
+      - DISCOVERY_PORT=8888
+      - MINIO_HOST=minio
+      - MINIO_PORT=9000
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    depends_on:
+      - coordinator
+      - kafka
+      - minio
+    volumes:
+      - ./test_results:/app/test_results
+    command: ["python", "/app/tests/simple_test_runner.py"]
+
+volumes:
+  kafka_data:
+  zookeeper_data:
+  minio_data: 
